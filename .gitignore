@@ -1,2 +1,4 @@
 .env
 manulife_demo_app/
+testing.py
+detailed_diagnostic.py
