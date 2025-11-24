@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
-# library getting current time stamp
-from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -168,95 +166,54 @@ class RawMCPClient:
             return result["content"][0]["text"]
         return str(result)
     
-    async def chat(self, user_message: str, model="gpt-4.1"): 
+    async def chat(self, user_message: str, model="gpt-3.5-turbo"):
         """Chat with OpenAI using MCP tools"""
         openai_tools = self.get_openai_tools()
         
-        system_message = {
-            "role": "system",
-            "content": """You are a data analyst assistant with Snowflake database access.
-
-    DATABASE CONTEXT:
-    - Database: BINANCE_DATA
-    - Schema: BTC_USDT_KLINE  
-    - Main Table: BTCUSDT_OHLCV_DATA (NOT btcusdt_1m!)
-    - Contains 1-minute OHLCV candlestick data
-
-    CRITICAL WORKFLOW RULES:
-    1. For any data query, follow this EXACT sequence:
-    a) Call snowflake_show_tables() to confirm available tables
-    b) Call snowflake_describe_table(table_name="BTCUSDT_OHLCV_DATA", database="BINANCE_DATA", schema="BTC_USDT_KLINE")
-    c) Call snowflake_query() with SQL using the actual column names from step b
-    d) Present results with analysis
-
-    2. NEVER stop after describe_table - ALWAYS execute the query
-    3. NEVER ask "would you like me to..." - JUST DO IT
-    4. If a tool fails, try the next step anyway
-
-
-    YOU MUST execute queries in EVERY response that asks for data. NO EXCEPTIONS.
-    """
-        }
-
-        max_iterations = 3  # Allow multiple tool call rounds
-        messages = [system_message, {"role": "user", "content": user_message}]
+        # First OpenAI call
+        response = self.openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": user_message}],
+            tools=openai_tools,
+            tool_choice="auto"
+        )
         
-        for iteration in range(max_iterations):
-            # OpenAI call
-            response = self.openai_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=openai_tools,
-                tool_choice="auto"
-            )
+        message = response.choices[0].message
+        
+        # If OpenAI wants to call tools
+        if message.tool_calls:
+            print("\n🔧 Tool calls:")
             
-            message = response.choices[0].message
-            
-            # If no tool calls, return the response
-            if not message.tool_calls:
-                return message.content
-            
-            # Execute tool calls
-            print(f"\n🔧 Tool calls (iteration {iteration + 1}):")
+            # Execute each tool call
             tool_results = []
-            
             for tool_call in message.tool_calls:
                 func_name = tool_call.function.name
                 func_args = json.loads(tool_call.function.arguments)
                 
                 print(f"   • {func_name}({json.dumps(func_args)})")
                 
-                try:
-                    # Call through MCP
-                    result = await self.call_tool(func_name, func_args)
-                    
-                    tool_results.append({
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "content": str(result)
-                    })
-                except Exception as e:
-                    # If tool fails, log but continue
-                    print(f"   ⚠️  Tool failed: {e}")
-                    tool_results.append({
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "content": f"Error: {str(e)}"
-                    })
+                # Call through MCP
+                result = await self.call_tool(func_name, func_args)
+                
+                tool_results.append({
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "content": str(result)
+                })
             
-            # Add assistant message and tool results to conversation
-            messages.append(message)
-            messages.extend(tool_results)
+            # Second OpenAI call with results
+            final_response = self.openai_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": user_message},
+                    message,
+                    *tool_results
+                ]
+            )
             
-            # Continue loop to allow next iteration of tool calls
+            return final_response.choices[0].message.content
         
-        # After max iterations, make final call for response
-        final_response = self.openai_client.chat.completions.create(
-            model=model,
-            messages=messages
-        )
-        
-        return final_response.choices[0].message.content
+        return message.content
 
 
 async def main():
@@ -303,17 +260,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 Goodbye!")
-
-"""
-    5. For "recent" or "past hour" queries, use this SQL pattern:
-
-    SELECT OPEN_TIME, OPEN_PRICE, HIGH_PRICE, LOW_PRICE, CLOSE_PRICE, VOLUME
-    FROM BINANCE_DATA.BTC_USDT_KLINE.BTCUSDT_OHLCV_DATA
-    ORDER BY OPEN_TIME DESC
-    LIMIT 60
-
-    TABLE STRUCTURE (use these exact column names):
-    - OPEN_TIME (timestamp)
-    - OPEN_PRICE, HIGH_PRICE, LOW_PRICE, CLOSE_PRICE (decimals)
-    - VOLUME (decimal)
-"""
