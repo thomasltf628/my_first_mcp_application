@@ -1,4 +1,4 @@
-# Manulife MCP Server with Snowflake Integration
+# MCP Server with Snowflake Integration
 
 This MCP (Model Context Protocol) server includes Snowflake database connectivity, allowing AI assistants to query and interact with your Snowflake data warehouse.
 
